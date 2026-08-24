@@ -6,14 +6,18 @@
 #include <pl/memory/Hook.hpp>
 #include <pl/memory/Signature.hpp>
 
+#include <atomic>
 #include <cstdint>
 #include <mutex>
-#include <string>
 #include <string_view>
-#include <vector>
 
 namespace accurate_block_placement::game_hook {
+
 namespace {
+
+struct InteractionResultValue {
+    std::uint8_t value;
+};
 
 using UseItemOnFn = InteractionResultValue (*)(
     void* gameMode,
@@ -22,7 +26,8 @@ using UseItemOnFn = InteractionResultValue (*)(
     std::uint8_t face,
     const void* hit,
     const void* block,
-    bool firstEvent);
+    bool firstEvent
+);
 
 UseItemOnFn gGameModeOriginal = nullptr;
 UseItemOnFn gSurvivalOriginal = nullptr;
@@ -31,7 +36,7 @@ pl::memory::HookHandle gGameModeHook;
 pl::memory::HookHandle gSurvivalHook;
 
 std::mutex gInstallMutex;
-bool gInstalled = false;
+std::atomic_bool gInstalled{false};
 
 InteractionResultValue gameModeUseItemOnDetour(
     void* gameMode,
@@ -40,21 +45,48 @@ InteractionResultValue gameModeUseItemOnDetour(
     std::uint8_t face,
     const void* hit,
     const void* block,
-    bool firstEvent) {
-
+    bool firstEvent
+) {
     std::uint8_t correctedFace = face;
 
+    /*
+     * Only alter the placement face for an actual placement event.
+     *
+     * Keep this path intentionally small:
+     * - no signature scanning
+     * - no dynamic loading
+     * - no allocations
+     * - no logging
+     */
     if (firstEvent && position && hit) {
-        const auto* blockPos = reinterpret_cast<const BlockPos*>(position);
-        const auto* hitPos = reinterpret_cast<const Vec3*>(hit);
+        const auto* blockPos =
+            reinterpret_cast<const BlockPos*>(position);
+
+        const auto* hitPos =
+            reinterpret_cast<const Vec3*>(hit);
 
         correctedFace = static_cast<std::uint8_t>(
-            chooseAccurateFace(*blockPos, *hitPos, static_cast<Face>(face)));
+            chooseAccurateFace(
+                *blockPos,
+                *hitPos,
+                static_cast<Face>(face)
+            )
+        );
     }
 
-    return gGameModeOriginal
-        ? gGameModeOriginal(gameMode, item, position, correctedFace, hit, block, firstEvent)
-        : InteractionResultValue{};
+    if (gGameModeOriginal) {
+        return gGameModeOriginal(
+            gameMode,
+            item,
+            position,
+            correctedFace,
+            hit,
+            block,
+            firstEvent
+        );
+    }
+
+    return InteractionResultValue{};
 }
 
 InteractionResultValue survivalModeUseItemOnDetour(
@@ -64,32 +96,67 @@ InteractionResultValue survivalModeUseItemOnDetour(
     std::uint8_t face,
     const void* hit,
     const void* block,
-    bool firstEvent) {
-
+    bool firstEvent
+) {
     std::uint8_t correctedFace = face;
 
     if (firstEvent && position && hit) {
-        const auto* blockPos = reinterpret_cast<const BlockPos*>(position);
-        const auto* hitPos = reinterpret_cast<const Vec3*>(hit);
+        const auto* blockPos =
+            reinterpret_cast<const BlockPos*>(position);
+
+        const auto* hitPos =
+            reinterpret_cast<const Vec3*>(hit);
 
         correctedFace = static_cast<std::uint8_t>(
-            chooseAccurateFace(*blockPos, *hitPos, static_cast<Face>(face)));
+            chooseAccurateFace(
+                *blockPos,
+                *hitPos,
+                static_cast<Face>(face)
+            )
+        );
     }
 
-    return gSurvivalOriginal
-        ? gSurvivalOriginal(gameMode, item, position, correctedFace, hit, block, firstEvent)
-        : InteractionResultValue{};
+    if (gSurvivalOriginal) {
+        return gSurvivalOriginal(
+            gameMode,
+            item,
+            position,
+            correctedFace,
+            hit,
+            block,
+            firstEvent
+        );
+    }
+
+    return InteractionResultValue{};
 }
 
-bool installOne(std::string_view signature, void* detour, void** original, pl::memory::HookHandle& handle) {
-    const auto address = pl::memory::resolveSignature(signature, "libminecraftpe.so");
-    if (!address) return false;
+bool installOne(
+    std::string_view signature,
+    void* detour,
+    void** original,
+    pl::memory::HookHandle& handle
+) {
+    /*
+     * Signature resolution happens only after
+     * libminecraftpe.so is known to be loaded.
+     */
+    const auto address =
+        pl::memory::resolveSignature(
+            signature,
+            "libminecraftpe.so"
+        );
+
+    if (!address) {
+        return false;
+    }
 
     handle = pl::memory::HookHandle(
         reinterpret_cast<void*>(address),
         detour,
         original,
-        pl::memory::HookPriority::Normal);
+        pl::memory::HookPriority::Normal
+    );
 
     return handle.installed();
 }
@@ -98,33 +165,62 @@ bool installOne(std::string_view signature, void* detour, void** original, pl::m
 
 bool install() {
     std::lock_guard lock(gInstallMutex);
-    if (gInstalled) return true;
+
+    if (gInstalled.load(std::memory_order_acquire)) {
+        return true;
+    }
 
     const bool gameModeOk = installOne(
         signatures::kGameModeUseItemOn,
-        reinterpret_cast<void*>(gameModeUseItemOnDetour),
-        reinterpret_cast<void**>(&gGameModeOriginal),
-        gGameModeHook);
+        reinterpret_cast<void*>(
+            gameModeUseItemOnDetour
+        ),
+        reinterpret_cast<void**>(
+            &gGameModeOriginal
+        ),
+        gGameModeHook
+    );
 
     const bool survivalOk = installOne(
         signatures::kSurvivalModeUseItemOn,
-        reinterpret_cast<void*>(survivalModeUseItemOnDetour),
-        reinterpret_cast<void**>(&gSurvivalOriginal),
-        gSurvivalHook);
+        reinterpret_cast<void*>(
+            survivalModeUseItemOnDetour
+        ),
+        reinterpret_cast<void**>(
+            &gSurvivalOriginal
+        ),
+        gSurvivalHook
+    );
 
-    // At least one mode must hook. In practice both resolve on supported
-    // Bedrock builds.
-    gInstalled = gameModeOk || survivalOk;
-    return gInstalled;
+    const bool installed =
+        gameModeOk || survivalOk;
+
+    gInstalled.store(
+        installed,
+        std::memory_order_release
+    );
+
+    return installed;
 }
 
 void uninstall() {
     std::lock_guard lock(gInstallMutex);
-    gGameModeHook.reset();
-    gSurvivalHook.reset();
+
+    if (gGameModeHook.installed()) {
+        gGameModeHook.reset();
+    }
+
+    if (gSurvivalHook.installed()) {
+        gSurvivalHook.reset();
+    }
+
     gGameModeOriginal = nullptr;
     gSurvivalOriginal = nullptr;
-    gInstalled = false;
+
+    gInstalled.store(
+        false,
+        std::memory_order_release
+    );
 }
 
 } // namespace accurate_block_placement::game_hook
