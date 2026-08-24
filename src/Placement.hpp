@@ -5,15 +5,15 @@
 namespace accurate_block_placement {
 
 struct BlockPos {
-    std::int32_t x{};
-    std::int32_t y{};
-    std::int32_t z{};
+    std::int32_t x;
+    std::int32_t y;
+    std::int32_t z;
 };
 
 struct Vec3 {
-    float x{};
-    float y{};
-    float z{};
+    float x;
+    float y;
+    float z;
 };
 
 enum class Face : std::uint8_t {
@@ -22,15 +22,13 @@ enum class Face : std::uint8_t {
     North = 2,
     South = 3,
     West = 4,
-    East = 5,
+    East = 5
 };
 
-struct InteractionResultValue {
-    std::uint8_t value{};
-};
-
-Face chooseAccurateFace(const BlockPos& block, const Vec3& hit, Face vanillaFace);
-bool shouldAdjustFace(const BlockPos& block, const Vec3& hit);
-Vec3 worldToLocal(const BlockPos& block, const Vec3& hit);
+Face chooseAccurateFace(
+    const BlockPos& block,
+    const Vec3& hit,
+    Face fallback
+);
 
 } // namespace accurate_block_placement
