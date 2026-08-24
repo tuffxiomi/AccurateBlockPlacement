@@ -4,77 +4,106 @@
 #include <cmath>
 
 namespace accurate_block_placement {
+
 namespace {
 
 constexpr float kEpsilon = 0.001f;
-constexpr float kEdgeThreshold = 0.18f;
 
-float distanceToBoundary(float v) {
-    const float clamped = std::clamp(v, 0.0f, 1.0f);
-    return std::min(clamped, 1.0f - clamped);
+float distanceToLowerFace(float value) {
+    return std::fabs(value);
 }
 
-bool inReasonableRange(float v) {
-    return std::isfinite(v) && v >= -0.05f && v <= 1.05f;
-}
-
-Face faceForX(float x) {
-    return x <= 0.5f ? Face::West : Face::East;
-}
-
-Face faceForY(float y) {
-    return y <= 0.5f ? Face::Down : Face::Up;
-}
-
-Face faceForZ(float z) {
-    return z <= 0.5f ? Face::North : Face::South;
+float distanceToUpperFace(float value) {
+    return std::fabs(1.0f - value);
 }
 
 } // namespace
 
-Vec3 worldToLocal(const BlockPos& block, const Vec3& hit) {
-    return {
-        hit.x - static_cast<float>(block.x),
-        hit.y - static_cast<float>(block.y),
-        hit.z - static_cast<float>(block.z),
+Face chooseAccurateFace(
+    const BlockPos& block,
+    const Vec3& hit,
+    Face fallback
+) {
+    /*
+     * Convert the world-space hit position into the block's local
+     * [0, 1] coordinate space.
+     */
+    const float localX =
+        hit.x - static_cast<float>(block.x);
+
+    const float localY =
+        hit.y - static_cast<float>(block.y);
+
+    const float localZ =
+        hit.z - static_cast<float>(block.z);
+
+    /*
+     * Keep normal placement behavior when the hit position is
+     * clearly inside the face instead of near an edge.
+     */
+    if (localX < -kEpsilon ||
+        localX > 1.0f + kEpsilon ||
+        localY < -kEpsilon ||
+        localY > 1.0f + kEpsilon ||
+        localZ < -kEpsilon ||
+        localZ > 1.0f + kEpsilon) {
+        return fallback;
+    }
+
+    float bestDistance = 1000000.0f;
+    Face bestFace = fallback;
+
+    const auto consider = [&](
+        float distance,
+        Face face
+    ) {
+        if (distance < bestDistance) {
+            bestDistance = distance;
+            bestFace = face;
+        }
     };
-}
 
-bool shouldAdjustFace(const BlockPos& block, const Vec3& hit) {
-    const Vec3 local = worldToLocal(block, hit);
+    consider(
+        distanceToLowerFace(localY),
+        Face::Down
+    );
 
-    if (!inReasonableRange(local.x) ||
-        !inReasonableRange(local.y) ||
-        !inReasonableRange(local.z)) {
-        return false;
+    consider(
+        distanceToUpperFace(localY),
+        Face::Up
+    );
+
+    consider(
+        distanceToLowerFace(localZ),
+        Face::North
+    );
+
+    consider(
+        distanceToUpperFace(localZ),
+        Face::South
+    );
+
+    consider(
+        distanceToLowerFace(localX),
+        Face::West
+    );
+
+    consider(
+        distanceToUpperFace(localX),
+        Face::East
+    );
+
+    /*
+     * If the hit is not actually close enough to a boundary,
+     * preserve Minecraft's original face.
+     */
+    constexpr float kBoundaryTolerance = 0.08f;
+
+    if (bestDistance > kBoundaryTolerance) {
+        return fallback;
     }
 
-    const float dx = distanceToBoundary(local.x);
-    const float dy = distanceToBoundary(local.y);
-    const float dz = distanceToBoundary(local.z);
-
-    return std::min({dx, dy, dz}) <= kEdgeThreshold + kEpsilon;
-}
-
-Face chooseAccurateFace(const BlockPos& block, const Vec3& hit, Face vanillaFace) {
-    if (!shouldAdjustFace(block, hit)) {
-        return vanillaFace;
-    }
-
-    const Vec3 local = worldToLocal(block, hit);
-    const float dx = distanceToBoundary(local.x);
-    const float dy = distanceToBoundary(local.y);
-    const float dz = distanceToBoundary(local.z);
-
-    // Keep the vanilla choice when the hit is not sufficiently close to a
-    // block edge. This minimizes behavior changes for ordinary placements.
-    if (std::min({dx, dy, dz}) > kEdgeThreshold + kEpsilon) {
-        return vanillaFace;
-    }
-
-    if (dx <= dy && dx <= dz) return faceForX(local.x);
-    if (dy <= dx && dy <= dz) return faceForY(local.y);
-    return faceForZ(local.z);
+    return bestFace;
 }
 
 } // namespace accurate_block_placement
