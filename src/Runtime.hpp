@@ -1,6 +1,7 @@
 #pragma once
 
-#include <filesystem>
+#include <atomic>
+#include <thread>
 
 namespace accurate_block_placement {
 
@@ -13,16 +14,25 @@ public:
     bool disable();
     bool unload();
 
-    void onMinecraftLoaded();
-
 private:
     Runtime() = default;
+    ~Runtime();
 
-    bool resolveAndInstall();
-    void installDlopenHook();
-    void uninstallDlopenHook();
+    Runtime(const Runtime&) = delete;
+    Runtime& operator=(const Runtime&) = delete;
 
-    std::filesystem::path mModDirectory;
+    void startWatcher();
+    void stopWatcher();
+    void watcherLoop();
+
+    bool minecraftLoaded() const;
+    bool installWhenReady();
+
+    std::atomic_bool mEnabled{false};
+    std::atomic_bool mInstalled{false};
+    std::atomic_bool mStopWatcher{false};
+
+    std::thread mWatcher;
 };
 
 } // namespace accurate_block_placement
