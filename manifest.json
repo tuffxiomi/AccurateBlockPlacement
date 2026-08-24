@@ -1,0 +1,9 @@
+{
+  "type": "preload-native",
+  "name": "Accurate Block Placement",
+  "author": "xiomi",
+  "version": "1.0.0",
+  "entry": "libAccurateBlockPlacement.so",
+  "icon": "",
+  "minecraft_versions": ["1.26.*"]
+}
