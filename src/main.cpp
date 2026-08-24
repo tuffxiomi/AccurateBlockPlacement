@@ -1,29 +1,30 @@
 #include "Runtime.hpp"
 
-#include <pl/Mod.hpp>
+#include <pl/Mod.h>
 
-class AccurateBlockPlacementMod {
+namespace {
+
+class AccurateBlockPlacementMod final : public pl::Mod {
 public:
-    static AccurateBlockPlacementMod& instance() {
-        static AccurateBlockPlacementMod mod;
-        return mod;
+    AccurateBlockPlacementMod() {
+        accurate_block_placement::Runtime::instance().load();
     }
 
-    bool load(pl::mod::ModContext&) {
-        return accurate_block_placement::Runtime::instance().load();
+    void onEnable() override {
+        accurate_block_placement::Runtime::instance().enable();
     }
 
-    bool enable(pl::mod::ModContext&) {
-        return accurate_block_placement::Runtime::instance().enable();
+    void onDisable() override {
+        accurate_block_placement::Runtime::instance().disable();
     }
 
-    bool disable(pl::mod::ModContext&) {
-        return accurate_block_placement::Runtime::instance().disable();
-    }
-
-    bool unload(pl::mod::ModContext&) {
-        return accurate_block_placement::Runtime::instance().unload();
+    void onUnload() override {
+        accurate_block_placement::Runtime::instance().unload();
     }
 };
 
-PL_REGISTER_MOD(AccurateBlockPlacementMod, AccurateBlockPlacementMod::instance())
+AccurateBlockPlacementMod gMod;
+
+} // namespace
+
+PL_REGISTER_MOD(AccurateBlockPlacementMod)
