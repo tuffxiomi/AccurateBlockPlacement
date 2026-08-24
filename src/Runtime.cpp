@@ -2,129 +2,166 @@
 
 #include "GameHook.hpp"
 
-#include <pl/memory/Hook.hpp>
-
 #include <dlfcn.h>
 
-#include <atomic>
-#include <cstring>
-#include <mutex>
+#include <chrono>
+#include <thread>
 
 namespace accurate_block_placement {
-namespace {
-
-using DlopenFn = void* (*)(const char*, int);
-
-std::mutex gRuntimeMutex;
-std::atomic_bool gMinecraftReady{false};
-std::atomic_bool gEnabled{false};
-
-DlopenFn gDlopenOriginal = nullptr;
-pl::memory::HookHandle gDlopenHook;
-
-thread_local bool gResolving = false;
-
-void* dlopenDetour(const char* filename, int flags) {
-    void* handle = gDlopenOriginal ? gDlopenOriginal(filename, flags) : nullptr;
-
-    if (handle &&
-        filename &&
-        !gResolving &&
-        std::strstr(filename, "libminecraftpe.so") != nullptr) {
-        Runtime::instance().onMinecraftLoaded();
-    }
-
-    return handle;
-}
-
-bool minecraftAlreadyLoaded() {
-    void* handle = dlopen("libminecraftpe.so", RTLD_NOW | RTLD_NOLOAD);
-    if (!handle) return false;
-    dlclose(handle);
-    return true;
-}
-
-} // namespace
 
 Runtime& Runtime::instance() {
     static Runtime runtime;
     return runtime;
 }
 
+Runtime::~Runtime() {
+    stopWatcher();
+}
+
 bool Runtime::load() {
     return true;
 }
 
-bool Runtime::resolveAndInstall() {
-    std::lock_guard lock(gRuntimeMutex);
+bool Runtime::minecraftLoaded() const {
+    void* handle = dlopen(
+        "libminecraftpe.so",
+        RTLD_NOW | RTLD_NOLOAD
+    );
 
-    if (!gEnabled.load(std::memory_order_acquire)) return false;
-    if (!minecraftAlreadyLoaded()) return false;
-    if (gMinecraftReady.load(std::memory_order_acquire)) return true;
+    if (!handle) {
+        return false;
+    }
 
-    const bool installed = game_hook::install();
-    gMinecraftReady.store(installed, std::memory_order_release);
-    return installed;
+    dlclose(handle);
+    return true;
 }
 
-void Runtime::installDlopenHook() {
-    void* target = dlsym(RTLD_DEFAULT, "dlopen");
-    if (!target) return;
+bool Runtime::installWhenReady() {
+    if (!mEnabled.load(std::memory_order_acquire)) {
+        return false;
+    }
 
-    gDlopenHook = pl::memory::HookHandle(
-        target,
-        reinterpret_cast<void*>(dlopenDetour),
-        reinterpret_cast<void**>(&gDlopenOriginal),
-        pl::memory::HookPriority::Low);
+    if (mInstalled.load(std::memory_order_acquire)) {
+        return true;
+    }
+
+    if (!minecraftLoaded()) {
+        return false;
+    }
+
+    /*
+     * Do NOT install hooks from a dlopen callback.
+     *
+     * Android's dynamic linker may still hold its loader lock while
+     * libminecraftpe.so is being loaded. Performing signature scanning
+     * or inline hooking from that path can deadlock the process and
+     * produce a startup ANR.
+     *
+     * The watcher calls this after libminecraftpe.so is already loaded.
+     */
+    if (!game_hook::install()) {
+        return false;
+    }
+
+    mInstalled.store(true, std::memory_order_release);
+    return true;
 }
 
-void Runtime::uninstallDlopenHook() {
-    gDlopenHook.reset();
-    gDlopenOriginal = nullptr;
+void Runtime::watcherLoop() {
+    /*
+     * Give the launcher and PreLoader a short amount of time to finish
+     * their normal initialization before beginning the polling loop.
+     */
+    std::this_thread::sleep_for(
+        std::chrono::milliseconds(250)
+    );
+
+    while (!mStopWatcher.load(std::memory_order_acquire)) {
+        if (mEnabled.load(std::memory_order_acquire) &&
+            !mInstalled.load(std::memory_order_acquire)) {
+
+            if (installWhenReady()) {
+                break;
+            }
+        }
+
+        std::this_thread::sleep_for(
+            std::chrono::milliseconds(250)
+        );
+    }
 }
 
-void Runtime::onMinecraftLoaded() {
-    if (!gEnabled.load(std::memory_order_acquire)) return;
+void Runtime::startWatcher() {
+    if (mWatcher.joinable()) {
+        return;
+    }
 
-    std::lock_guard resolveGuard(gRuntimeMutex);
-    if (gMinecraftReady.load(std::memory_order_acquire)) return;
+    mStopWatcher.store(
+        false,
+        std::memory_order_release
+    );
 
-    // Guard against recursive dlopen calls made by the resolver/hooker.
-    if (gResolving) return;
-    gResolving = true;
-    const bool installed = game_hook::install();
-    gResolving = false;
+    mWatcher = std::thread(
+        [this]() {
+            watcherLoop();
+        }
+    );
+}
 
-    if (installed) {
-        gMinecraftReady.store(true, std::memory_order_release);
-        uninstallDlopenHook();
+void Runtime::stopWatcher() {
+    mStopWatcher.store(
+        true,
+        std::memory_order_release
+    );
+
+    if (mWatcher.joinable()) {
+        mWatcher.join();
     }
 }
 
 bool Runtime::enable() {
-    gEnabled.store(true, std::memory_order_release);
+    mEnabled.store(
+        true,
+        std::memory_order_release
+    );
 
-    if (minecraftAlreadyLoaded()) {
-        return resolveAndInstall();
-    }
+    /*
+     * Hook installation happens on the watcher thread instead of
+     * the Android loader thread.
+     */
+    startWatcher();
 
-    installDlopenHook();
     return true;
 }
 
 bool Runtime::disable() {
-    gEnabled.store(false, std::memory_order_release);
+    mEnabled.store(
+        false,
+        std::memory_order_release
+    );
 
-    std::lock_guard lock(gRuntimeMutex);
-    if (gMinecraftReady.exchange(false, std::memory_order_acq_rel)) {
-        game_hook::uninstall();
-    }
-    uninstallDlopenHook();
+    /*
+     * Do not remove inline hooks while Minecraft could be executing
+     * through them. The detours remain installed for process lifetime
+     * and should be kept extremely small.
+     */
     return true;
 }
 
 bool Runtime::unload() {
-    return disable();
+    mEnabled.store(
+        false,
+        std::memory_order_release
+    );
+
+    stopWatcher();
+
+    /*
+     * Levi normally keeps native mods alive for the lifetime of the
+     * Minecraft process. Avoid removing executable patches during
+     * shutdown because another thread could still be executing them.
+     */
+    return true;
 }
 
 } // namespace accurate_block_placement
